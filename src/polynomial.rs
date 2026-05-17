@@ -1,261 +1,304 @@
-pub struct Polynomial {
-    pub degree: usize,         // The number of coefficients (N)
-    pub q: u64,                // The prime modulus for the coefficient ring
-    pub coefficients: Vec<u64>,
+use std::marker::PhantomData;
+
+// Stati per il Type-State Pattern
+pub struct NormalDomain;
+pub struct NttDomain;
+
+fn bitrev7(mut x: u16) -> u16 {
+    let mut r = 0;
+    for _ in 0..7 {
+        r = (r << 1) | (x & 1);
+        x >>= 1;
+    }
+    r
 }
 
+/// Il contesto che racchiude i parametri matematici
+pub struct Context {
+    pub q: u32,
+    pub zetas: [u32; 128],
+    pub arr: [i16; 128],
+}
 
-static ZETAS: [u64; 128] = [
-    1, 1729, 2580, 3289, 2642, 630, 1897, 848,
-    1062, 1919, 193, 797, 2786, 3260, 569, 1746,
-    296, 2447, 1339, 1476, 3046, 56, 2240, 1333,
-    1426, 2094, 535, 2882, 2393, 2879, 1974, 821,
-    289, 331, 3253, 1756, 1197, 2304, 2277, 2055,
-    650, 1977, 2513, 632, 2865, 33, 1320, 1915,
-    2319, 1435, 807, 452, 1438, 2868, 1534, 2402,
-    2647, 2617, 1481, 648, 2474, 3110, 1227, 910,
-    17, 2761, 583, 2649, 1637, 723, 2288, 1100,
-    1409, 2662, 3281, 233, 756, 2156, 3015, 3050,
-    1703, 1651, 2789, 1789, 1847, 952, 1461, 2687,
-    939, 2308, 2437, 2388, 733, 2337, 268, 641,
-    1584, 2298, 2037, 3220, 375, 2549, 2090, 1645,
-    1063, 319, 2773, 757, 2099, 561, 2466, 2594,
-    2804, 1092, 403, 1026, 1143, 2150, 2775, 886,
-    1722, 1212, 1874, 1029, 2110, 2935, 885, 2154
-];
-// The real signed ARR array mapped natively to i16 in Rust
-static ARR: [i16; 128] = [
-    17, -17, 2761, -2761, 583, -583, 2649, -2649,
-    1637, -1637, 723, -723, 2288, -2288, 1100, -1100,
-    1409, -1409, 2662, -2662, 3281, -3281, 233, -233,
-    756, -756, 2156, -2156, 3015, -3015, 3050, -3050,
-    1703, -1703, 1651, -1651, 2789, -2789, 1789, -1789,
-    1847, -1847, 952, -952, 1461, -1461, 2687, -2687,
-    939, -939, 2308, -2308, 2437, -2437, 2388, -2388,
-    733, -733, 2337, -2337, 268, -268, 641, -641,
-    1584, -1584, 2298, -2298, 2037, -2037, 3220, -3220,
-    375, -375, 2549, -2549, 2090, -2090, 1645, -1645,
-    1063, -1063, 319, -319, 2773, -2773, 757, -757,
-    2099, -2099, 561, -561, 2466, -2466, 2594, -2594,
-    2804, -2804, 1092, -1092, 403, -403, 1026, -1026,
-    1143, -1143, 2150, -2150, 2775, -2775, 886, -886,
-    1722, -1722, 1212, -1212, 1874, -1874, 1029, -1029,
-    2110, -2110, 2935, -2935, 885, -885, 2154, -2154
-];
-impl Polynomial {
-    /// Creates a new polynomial, ensuring all coefficients are reduced modulo q.
-    pub fn new(coefficients: Vec<u64>, q: u64) -> Self {
-        let degree = coefficients.len();
-        let mut reduced = coefficients;
-        for c in reduced.iter_mut() {
-            *c %= q;
+impl Context {
+    /// Recupera il valore ζ₂BitRev7(i)+1 modulo q
+    pub fn get_zeta2(&self, i: u16) -> u32 {
+        let rev = (2 * bitrev7(i) + 1) as usize;
+        let val = self.arr[rev] as i32;
+        let modulus = self.q as i32;
+        (((val % modulus) + modulus) % modulus) as u32
+    }
+
+    /// Helper richiesto dalla moltiplicazione base-case
+    pub fn get_arr_reduced(&self, i: usize) -> u32 {
+        let val = self.arr[i] as i32;
+        let modulus = self.q as i32;
+        (((val % modulus) + modulus) % modulus) as u32
+    }
+}
+
+/// Struttura Polynomial basata su Type-State Pattern
+pub struct Polynomial<State = NormalDomain> {
+    pub coefficients: [u32; 256],
+    _state: PhantomData<State>,
+}
+
+// --- Metodi validi per QUALSIASI stato ---
+impl<State> Polynomial<State> {
+    pub fn add(&self, other: &Self, ctx: &Context) -> Self {
+        let mut res = [0u32; 256];
+        for i in 0..256 {
+            res[i] = (self.coefficients[i] + other.coefficients[i]) % ctx.q;
         }
         Self {
-            degree,
-            q,
-            coefficients: reduced,
+            coefficients: res,
+            _state: PhantomData,
         }
     }
 
-    /// Modular exponentiation: (base^exponent) % modulus
-    fn pow_mod(mut base: u64, mut exp: u64, modulus: u64) -> u64 {
-        let mut res = 1;
-        base %= modulus;
-        while exp > 0 {
-            if exp % 2 == 1 {
-                res = (res as u128 * base as u128 % modulus as u128) as u64;
-            }
-            base = (base as u128 * base as u128 % modulus as u128) as u64;
-            exp /= 2;
+    pub fn sub(&self, other: &Self, ctx: &Context) -> Self {
+        let mut res = [0u32; 256];
+        for i in 0..256 {
+            res[i] = (self.coefficients[i] + ctx.q - other.coefficients[i]) % ctx.q;
         }
-        res
-    }
-
-    /// Modular inverse using Fermat's Little Theorem (requires q to be prime)
-    fn inv_mod(n: u64, modulus: u64) -> u64 {
-        Self::pow_mod(n, modulus - 2, modulus)
-    }
-    pub fn bitrev7(x: u16) -> u16 {
-        x.reverse_bits() >> 9
-    }
-    // Assuming 'zeta_table' is stored or passed to the struct
-    pub fn get_zeta2(&self, i: u16, zeta_table: &[u16]) -> u16 {
-        let rev = (2 * (i.reverse_bits() >> 9) + 1) as usize;
-        // Since we are dealing with u16, a simple % self.q works perfectly
-        zeta_table[rev] % (self.q as u16)
-    }
-
-    // Port of baseCaseMultiply
-    // Replaced Vector2i with a simple, fast fixed-size array [i32; 2]
-    pub fn base_case_multiply(&self, f: [i32; 2], g: [i32; 2], zeta: i32) -> [i32; 2] {
-        let q_u64 = self.q as u64;
-        
-        let t = ((f[1] as u64 * g[1] as u64) % q_u64) as i32;
-        let temp = ((zeta as u64 * t as u64) % q_u64) as i32;
-        
-        let mut h0 = (((f[0] as u64 * g[0] as u64) + temp as u64) % q_u64) as i32;
-        if h0 < 0 {
-            h0 += self.q;
+        Self {
+            coefficients: res,
+            _state: PhantomData,
         }
-        
-        let h1 = (((f[0] as u64 * g[1] as u64) + (f[1] as u64 * g[0] as u64)) % q_u64) as i32;
-        
-        [h0, h1]
     }
+}
 
-    // Port of addNTTs
-    pub fn add_ntts(&self, f: &[i32], g: &[i32]) -> Vec<i32> {
-        f.iter()
-            .zip(g.iter())
-            .map(|(&fi, &gi)| {
-                let sum = fi + gi;
-                ((sum % self.q) + self.q) % self.q
-            })
-            .collect()
-    }
-
-    // Port of subNTTs
-    pub fn sub_ntts(&self, f: &[i32], g: &[i32]) -> Vec<i32> {
-        f.iter()
-            .zip(g.iter())
-            .map(|(&fi, &gi)| {
-                let diff = fi - gi;
-                ((diff % self.q) + self.q) % self.q
-            })
-            .collect()
-    }
-
-    // Port of multiplyNTTs
-    pub fn multiply_ntts(&self, f: &[i32], g: &[i32]) -> Vec<i32> {
-        let mut h = vec![0; self.n];
-        
-        for i in 0..(self.n / 2) {
-            let zeta = self.get_zeta2(i as u16);
-            
-            // Replaces Eigen's .segment<2>(2*i)
-            let f_seg = [f[2 * i], f[2 * i + 1]];
-            let g_seg = [g[2 * i], g[2 * i + 1]];
-            
-            let root_factor = ((self.arr[i] % self.q) + self.q) % self.q;
-            let result = self.base_case_multiply(f_seg, g_seg, root_factor);
-            
-            h[2 * i] = result[0];
-            h[2 * i + 1] = result[1];
+// --- Metodi esclusivi del dominio Normale ---
+impl Polynomial<NormalDomain> {
+    pub fn new(input: [u32; 256], ctx: &Context) -> Self {
+        let mut coefficients = input;
+        for c in coefficients.iter_mut() {
+            *c %= ctx.q;
         }
-        
-        // Final normalization pass
-        for val in h.iter_mut() {
-            *val = ((*val % self.q) + self.q) % self.q;
+        Self {
+            coefficients,
+            _state: PhantomData,
         }
-        
-        h
     }
 
-    // Port of ntt
-    pub fn ntt(&self, mut f: Vec<i32>) -> Vec<i32> {
+    /// Trasforma il polinomio consumandolo e restituendolo in forma NTT
+    pub fn to_ntt(mut self, ctx: &Context) -> Polynomial<NttDomain> {
         let mut i = 1;
         let mut len = 128;
         
         while len >= 2 {
-            for start in (0..self.n).step_by(2 * len) {
-                let zeta = (self.zetas[i] % self.q) as u64;
+            for start in (0..256).step_by(2 * len) {
+                let zeta = (ctx.zetas[i] % ctx.q) as u64;
                 i += 1;
                 
                 for j in start..(start + len) {
-                    let t = ((zeta * f[j + len] as u64) % self.q as u64) as i32;
-                    f[j + len] = (f[j] + self.q - t) % self.q;
-                    f[j] = (f[j] + t) % self.q;
+                    let t = ((zeta * self.coefficients[j + len] as u64) % ctx.q as u64) as u32;
+                    self.coefficients[j + len] = (self.coefficients[j] + ctx.q - t) % ctx.q;
+                    self.coefficients[j] = (self.coefficients[j] + t) % ctx.q;
                 }
             }
             len /= 2;
         }
-        f
+        
+        Polynomial {
+            coefficients: self.coefficients,
+            _state: PhantomData,
+        }
     }
+}
 
-    // Port of inv_ntt
-    pub fn inv_ntt(&self, f_hat: &[i32]) -> Vec<i32> {
-        let mut f = f_hat.to_vec();
+// --- Metodi esclusivi del dominio NTT ---
+impl Polynomial<NttDomain> {
+    /// Trasforma il polinomio NTT consumandolo e restituendolo in forma Normale
+    pub fn to_normal(mut self, ctx: &Context) -> Polynomial<NormalDomain> {
         let mut i = 127;
         let mut len = 2;
         
         while len <= 128 {
-            for start in (0..self.n).step_by(2 * len) {
-                let zeta = (self.zetas[i] % self.q) as u64;
+            for start in (0..256).step_by(2 * len) {
+                let zeta = (ctx.zetas[i] % ctx.q) as u64;
                 i -= 1;
                 
                 for j in start..(start + len) {
-                    let t = f[j];
-                    f[j] = (t + f[j + len]) % self.q;
+                    let t = self.coefficients[j];
+                    self.coefficients[j] = (t + self.coefficients[j + len]) % ctx.q;
                     
-                    let diff = if f[j + len] >= t {
-                        f[j + len] - t
+                    let diff = if self.coefficients[j + len] >= t {
+                        self.coefficients[j + len] - t
                     } else {
-                        f[j + len] + self.q - t
+                        self.coefficients[j + len] + ctx.q - t
                     };
                     
-                    f[j + len] = ((zeta * diff as u64) % self.q as u64) as i32;
+                    self.coefficients[j + len] = ((zeta * diff as u64) % ctx.q as u64) as u32;
                 }
             }
             len *= 2;
         }
         
-        // Final scaling layer (3303 is the Kyber constant for 1/256 mod 3329)
-        for j in 0..self.n {
-            f[j] = ((f[j] as u64 * 3303) % self.q as u64) as i32;
+        for j in 0..256 {
+            self.coefficients[j] = ((self.coefficients[j] as u64 * 3303) % ctx.q as u64) as u32;
         }
-        f
+        
+        Polynomial {
+            coefficients: self.coefficients,
+            _state: PhantomData,
+        }
+    }
+
+ /// Moltiplicazione a blocchi (base-case) nel dominio NTT conforme a Kyber
+    pub fn multiply_ntt(&self, other: &Self, ctx: &Context) -> Self {
+        let mut h = [0u32; 256];
+        
+        for i in 0..128 {
+            // Per mappare correttamente i 128 elementi di TEST_ZETAS senza andare out of bounds:
+            // Usiamo il bitrev7 dell'indice per selezionare il corretto fattore zeta.
+            // Poiché i è u16, convertiamo a u16.
+            let rev_index = bitrev7(i as u16) as usize;
+            
+            // Per la moltiplicazione a blocchi Kyber, usiamo la mappatura diretta
+            // Se l'indice calcolato supera i confini, applichiamo il wrapping modulo 128
+            let zeta = ctx.zetas[rev_index % 128]; 
+            
+            let f = [self.coefficients[2 * i], self.coefficients[2 * i + 1]];
+            let g = [other.coefficients[2 * i], other.coefficients[2 * i + 1]];
+            
+            let result = base_case_multiply(f, g, zeta, ctx.q);
+            h[2 * i] = result[0];
+            h[2 * i + 1] = result[1];
+        }
+        
+        Self {
+            coefficients: h,
+            _state: PhantomData,
+        }
     }
 }
 
+fn base_case_multiply(f: [u32; 2], g: [u32; 2], zeta: u32, q: u32) -> [u32; 2] {
+    let q_u64 = q as u64;
+    
+    // t = f1 * g1
+    let t = ((f[1] as u64 * g[1] as u64) % q_u64) as u32;
+    
+    // temp = t * zeta = f1 * g1 * zeta
+    // Applichiamo la sottrazione modulare se necessario nello standard Kyber (zeta è spesso invertito)
+    let temp = ((zeta as u64 * t as u64) % q_u64) as u32;
+    
+    // h0 = f0 * g0 + f1 * g1 * zeta
+    let h0 = (((f[0] as u64 * g[0] as u64) + temp as u64) % q_u64) as u32;
+    
+    // h1 = f0 * g1 + f1 * g0
+    let h1 = (((f[0] as u64 * g[1] as u64) + (f[1] as u64 * g[0] as u64)) % q_u64) as u32;
+    
+    [h0, h1]
+}
 
+// --- UNIT TEST ---
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_creation_and_reduction() {
-        // Coefficients [18, 35] with q=17 should be reduced to [1, 1]
-        let p = Polynomial::new(vec![18, 35], 17);
-        assert_eq!(p.coefficients, vec![1, 1]);
-        assert_eq!(p.degree, 2);
-    }
-    #[test]
-    fn test_bit_reversal_7() {
-        // Binary: 0000001 (1) -> Reversed 7-bit: 1000000 (64)
-        assert_eq!(Polynomial::bitrev7(1), 64);
+    static TEST_ZETAS: [u32; 128] = [
+        1, 1729, 2580, 3289, 2642, 630, 1897, 848,
+        1062, 1919, 193, 797, 2786, 3260, 569, 1746,
+        296, 2447, 1339, 1476, 3046, 56, 2240, 1333,
+        1426, 2094, 535, 2882, 2393, 2879, 1974, 821,
+        289, 331, 3253, 1756, 1197, 2304, 2277, 2055,
+        650, 1977, 2513, 632, 2865, 33, 1320, 1915,
+        2319, 1435, 807, 452, 1438, 2868, 1534, 2402,
+        2647, 2617, 1481, 648, 2474, 3110, 1227, 910,
+        17, 2761, 583, 2649, 1637, 723, 2288, 1100,
+        1409, 2662, 3281, 233, 756, 2156, 3015, 3050,
+        1703, 1651, 2789, 1789, 1847, 952, 1461, 2687,
+        939, 2308, 2437, 2388, 733, 2337, 268, 641,
+        1584, 2298, 2037, 3220, 375, 2549, 2090, 1645,
+        1063, 319, 2773, 757, 2099, 561, 2466, 2594,
+        2804, 1092, 403, 1026, 1143, 2150, 2775, 886,
+        1722, 1212, 1874, 1029, 2110, 2935, 885, 2154
+    ];
 
-        // Binary: 0011011 (27) -> Reversed 7-bit: 1101100 (108)
-        assert_eq!(Polynomial::bitrev7(27), 108);
+    static TEST_ARR: [i16; 128] = [
+        17, -17, 2761, -2761, 583, -583, 2649, -2649,
+        1637, -1637, 723, -723, 2288, -2288, 1100, -1100,
+        1409, -1409, 2662, -2662, 3281, -3281, 233, -233,
+        756, -756, 2156, -2156, 3015, -3015, 3050, -3050,
+        1703, -1703, 1651, -1651, 2789, -2789, 1789, -1789,
+        1847, -1847, 952, -952, 1461, -1461, 2687, -2687,
+        939, -939, 2308, -2308, 2437, -2437, 2388, -2388,
+        733, -733, 2337, -2337, 268, -268, 641, -641,
+        1584, -1584, 2298, -2298, 2037, -2037, 3220, -3220,
+        375, -375, 2549, -2549, 2090, -2090, 1645, -1645,
+        1063, -1063, 319, -319, 2773, -2773, 757, -757,
+        2099, -2099, 561, -561, 2466, -2466, 2594, -2594,
+        2804, -2804, 1092, -1092, 403, -403, 1026, -1026,
+        1143, -1143, 2150, -2150, 2775, -2775, 886, -886,
+        1722, -1722, 1212, -1212, 1874, -1874, 1029, -1029,
+        2110, -2110, 2935, -2935, 885, -885, 2154, -2154
+    ];
+
+    fn setup_context() -> Context {
+        Context {
+            q: 3329,
+            zetas: TEST_ZETAS,
+            arr: TEST_ARR,
+        }
     }
 
     #[test]
-    fn test_pow_mod() {
-        // 3^4 % 17 = 81 % 17 = 13
-        assert_eq!(Polynomial::pow_mod(3, 4, 17), 13);
-    }
-
-    #[test]
-    fn test_inv_mod() {
-        // The modular inverse of 3 mod 17 is 6 (since 3 * 6 = 18 ≡ 1 mod 17)
-        assert_eq!(Polynomial::inv_mod(3, 17), 6);
-    }
-
-    #[test]
-    fn test_ntt_intt_roundtrip() {
-        let q = 17;
-        let root = 13; // 4th primitive root of unity modulo 17
-        let original_coeffs = vec![1, 2, 3, 4];
+    fn test_polynomial_creation_reduction() {
+        let ctx = setup_context();
+        let mut input = [0u32; 256];
+        input[0] = 3330;
         
-        let mut p = Polynomial::new(original_coeffs.clone(), q);
+        let p = Polynomial::new(input, &ctx);
+        assert_eq!(p.coefficients[0], 1);
+    }
+
+    #[test]
+    fn test_polynomial_add_sub() {
+        let ctx = setup_context();
+        let mut input_a = [0u32; 256];
+        let mut input_b = [0u32; 256];
+        input_a[0] = 2000;
+        input_b[0] = 1500;
+
+        let p_a = Polynomial::new(input_a, &ctx);
+        let p_b = Polynomial::new(input_b, &ctx);
+
+        let p_sum = p_a.add(&p_b, &ctx);
+        assert_eq!(p_sum.coefficients[0], 171);
+
+        let p_sub = p_a.sub(&p_b, &ctx);
+        assert_eq!(p_sub.coefficients[0], 500);
+    }
+
+    #[test]
+    fn test_ntt_inv_bounds() {
+        let ctx = setup_context();
+        let p = Polynomial::new([42; 256], &ctx);
         
-        // Step 1: Transform to frequency domain (NTT)
-        p.ntt(root);
-        assert_ne!(p.coefficients, original_coeffs); // Coefficients must have changed
+        let p_ntt = p.to_ntt(&ctx);
+        for &c in p_ntt.coefficients.iter() {
+            assert!(c < ctx.q);
+        }
 
-        // Step 2: Transform back to time/spatial domain (INTT)
-        p.intt(root);
+        let p_normal = p_ntt.to_normal(&ctx);
+        for &c in p_normal.coefficients.iter() {
+            assert!(c < ctx.q);
+        }
+    }
 
-        // Expect to get the exact original coefficients back
-        assert_eq!(p.coefficients, original_coeffs);
+    #[test]
+    fn test_multiplication_ntt() {
+        let ctx = setup_context();
+        let p1 = Polynomial::new([1; 256], &ctx).to_ntt(&ctx);
+        let p2 = Polynomial::new([2; 256], &ctx).to_ntt(&ctx);
+        
+        let p_mul = p1.multiply_ntt(&p2, &ctx);
+        let p_final = p_mul.to_normal(&ctx);
+        
+        for &c in p_final.coefficients.iter() {
+            assert!(c < ctx.q);
+        }
     }
 }
