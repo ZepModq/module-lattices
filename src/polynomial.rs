@@ -173,7 +173,7 @@ impl Polynomial {
     }
 
     // Port of inv_ntt
-    pub fn intt(&self, f_hat: &[i32]) -> Vec<i32> {
+    pub fn inv_ntt(&self, f_hat: &[i32]) -> Vec<i32> {
         let mut f = f_hat.to_vec();
         let mut i = 127;
         let mut len = 2;
